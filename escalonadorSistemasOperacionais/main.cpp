@@ -5,9 +5,9 @@
 
 void exibirAjuda() {
     std::cout << "\nComandos do Modo Passo-a-Passo:\n"
-              << "  [ENTER] : Avança 1 tick\n"
+              << "  [ENTER] : Avanca 1 tick\n"
               << "  b       : Retrocede 1 tick\n"
-              << "  g       : Exporta o Gráfico de Gantt SVG atual\n"
+              << "  g       : Exporta o Grafico de Gantt SVG atual\n"
               << "  q       : Sair\n";
 }
 
@@ -60,7 +60,7 @@ int main(int argc, char* argv[]) {
                     break;
                 }
 
-                std::cout << "\nComando (ENTER=avançar, b=voltar, g=exportar, q=sair): ";
+                std::cout << "\nComando (ENTER=avancar, b=voltar, g=exportar, q=sair): ";
                 std::getline(std::cin, comando);
 
                 if (comando == "q") break;
