@@ -7,7 +7,7 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
     std::ofstream arq(caminhoFicheiro);
     if (!arq.is_open()) return;
 
-    const auto& estadoFinal = historicoSnapshots_.back();
+    const auto& estadoFinal = getEstadoAtual();
     long long tempoTotal = estadoFinal.relogioGlobal;
 
     // Ordena as tarefas por ID decrescente para o eixo Y (Requisito 2.5)
@@ -20,8 +20,20 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
     int margemEsquerda = 100;
     int margemTopo = 60;
 
-    int larguraTotal = margemEsquerda + static_cast<int>(tempoTotal + 2) * larguraBloco;
-    int alturaTotal = margemTopo + static_cast<int>(tarefasOrdenadas.size()) * alturaLinha + 60;
+    int larguraTotal = std::max(
+        800,
+        margemEsquerda + static_cast<int>(tempoTotal + 2) * larguraBloco);
+
+    int yInicioCPUs =
+        margemTopo + static_cast<int>(tarefasOrdenadas.size()) * alturaLinha;
+
+    int alturaLinhaCPU = 28;
+
+    int fimLinhas =
+        yInicioCPUs +
+        static_cast<int>(estadoFinal.cpus.size()) * alturaLinhaCPU;
+
+    int alturaTotal = fimLinhas + 115;
 
     // Cabeçalho SVG
     arq << "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
@@ -29,18 +41,35 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
         << "\" height=\"" << alturaTotal << "\">\n"
         << "<rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n";
 
+        arq << "<defs>\n"
+            << "<pattern id=\"suspenso\" "
+            << "patternUnits=\"userSpaceOnUse\" width=\"6\" height=\"6\">\n"
+            << "<rect width=\"6\" height=\"6\" fill=\"#000000\"/>\n"
+            << "<circle cx=\"3\" cy=\"3\" r=\"1\" fill=\"#ffffff\"/>\n"
+            << "</pattern>\n"
+            << "<pattern id=\"cpuDesligada\" "
+            << "patternUnits=\"userSpaceOnUse\" width=\"6\" height=\"6\">\n"
+            << "<rect width=\"6\" height=\"6\" fill=\"#eeeeee\"/>\n"
+            << "<path d=\"M0 6 L6 0\" "
+            << "stroke=\"#555555\" stroke-width=\"1\"/>\n"
+            << "</pattern>\n"
+            << "</defs>\n";
+
     // Título
-    arq << "<text x=\"20\" y=\"30\" font-family=\"Arial\" font-size=\"18\" font-weight=\"bold\">"
-        << "Gráfico de Gantt - Algoritmo: " << configOriginal_.algoritmo << "</text>\n";
+    arq << "<text x=\"20\" y=\"30\" font-family=\"Arial\" font-size=\"18\" "
+        << "font-weight=\"bold\">"
+        << "Gráfico de Gantt - Algoritmo: " << configOriginal_.algoritmo
+        << "</text>\n";
 
     // Eixo de Tempo (X)
     for (long long t = 0; t <= tempoTotal; ++t) {
         int x = margemEsquerda + static_cast<int>(t) * larguraBloco;
         arq << "<line x1=\"" << x << "\" y1=\"" << margemTopo
-            << "\" x2=\"" << x << "\" y2=\"" << (alturaTotal - 40)
+            << "\" x2=\"" << x << "\" y2=\"" << fimLinhas
             << "\" stroke=\"#e0e0e0\" stroke-dasharray=\"2,2\"/>\n"
-            << "<text x=\"" << x << "\" y=\"" << (alturaTotal - 20)
-            << "\" font-family=\"Arial\" font-size=\"10\" text-anchor=\"middle\">" << t << "</text>\n";
+            << "<text x=\"" << x << "\" y=\"" << (fimLinhas + 15)
+            << "\" font-family=\"Arial\" font-size=\"10\" text-anchor=\"middle\">"
+            << t << "</text>\n";
     }
 
     // Desenha as Tarefas e as suas Execuções (Eixo Y)
@@ -60,7 +89,19 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
     }
 
     // Mapeamento de instantes de execução a partir dos snapshots
-    for (const auto& snap : historicoSnapshots_) {
+    for (size_t c = 0; c < estadoFinal.cpus.size(); ++c) {
+        int y = yInicioCPUs + static_cast<int>(c) * alturaLinhaCPU;
+
+        arq << "<text x=\"10\" y=\"" << (y + 18)
+            << "\" font-family=\"Arial\" font-size=\"12\" "
+            << "font-weight=\"bold\">CPU " << c << "</text>\n"
+            << "<line x1=\"" << margemEsquerda << "\" y1=\"" << (y + 14)
+            << "\" x2=\"" << (larguraTotal - 20) << "\" y2=\"" << (y + 14)
+            << "\" stroke=\"#cccccc\" stroke-width=\"1\"/>\n";
+    }
+
+    for (size_t passo = 1; passo <= indicePassoAtual_; ++passo) {
+        const auto& snap = historicoSnapshots_[passo];
         long long t = snap.relogioGlobal;
         if (t == 0) continue;
 
@@ -92,18 +133,70 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
                     << "<text x=\"" << (x + larguraBloco / 2) << "\" y=\"" << (y + 18)
                     << "\" font-family=\"Arial\" font-size=\"9\" fill=\"#ffffff\" font-weight=\"bold\" text-anchor=\"middle\">"
                     << "CPU" << reg.idCPU << "</text>\n";
-            } else if (reg.estado == EstadoOcorrencia::Pronta) {
+            } 
+            else if (reg.estado == EstadoOcorrencia::Pronta) {
                 // Moldura sem preenchimento para Fila de Espera (Requisito 2.1)
                 arq << "<rect x=\"" << x << "\" y=\"" << y
                     << "\" width=\"" << larguraBloco << "\" height=\"30\" fill=\"none\" stroke=\"#888888\" stroke-dasharray=\"2,2\"/>\n";
             }
-
-            // Marcador de Conclusão / Perda de Prazo (Requisito 2.2)
-            if (reg.eventoPerdaPrazo) {
-                arq << "<text x=\"" << (x + larguraBloco) << "\" y=\"" << (y + 12)
-                    << "\" font-family=\"Arial\" font-size=\"14\" fill=\"red\" font-weight=\"bold\">✖</text>\n";
+            else if (reg.estado == EstadoOcorrencia::Suspensa) {
+                arq << "<rect x=\"" << x << "\" y=\"" << y
+                    << "\" width=\"" << larguraBloco
+                    << "\" height=\"30\" fill=\"url(#suspenso)\" "
+                    << "stroke=\"#000000\"/>\n";
             }
 
+            // Marcador de chegada
+            if (reg.eventoChegada) {
+                arq << "<circle cx=\"" << (x + 6) << "\" cy=\"" << (y + 6)
+                    << "\" r=\"5\" fill=\"#ffffff\" stroke=\"#008000\" "
+                    << "stroke-width=\"2\"/>\n"
+                    << "<text x=\"" << (x + 6) << "\" y=\"" << (y + 9)
+                    << "\" font-family=\"Arial\" font-size=\"7\" "
+                    << "font-weight=\"bold\" text-anchor=\"middle\" "
+                    << "fill=\"#008000\">A</text>\n";
+            }
+
+            // Marcador de conclusão
+            if (reg.eventoConclusao) {
+                arq << "<circle cx=\"" << (x + larguraBloco - 6)
+                    << "\" cy=\"" << (y + 6)
+                    << "\" r=\"5\" fill=\"#ffffff\" stroke=\"#000000\" "
+                    << "stroke-width=\"2\"/>\n"
+                    << "<text x=\"" << (x + larguraBloco - 6)
+                    << "\" y=\"" << (y + 9)
+                    << "\" font-family=\"Arial\" font-size=\"7\" "
+                    << "font-weight=\"bold\" text-anchor=\"middle\" "
+                    << "fill=\"#000000\">F</text>\n";
+            }
+
+            // Marcador de perda de prazo
+            if (reg.eventoPerdaPrazo) {
+                arq << "<circle cx=\"" << (x + larguraBloco / 2)
+                    << "\" cy=\"" << (y + 6)
+                    << "\" r=\"5\" fill=\"#ffffff\" stroke=\"#ff0000\" "
+                    << "stroke-width=\"2\"/>\n"
+                    << "<text x=\"" << (x + larguraBloco / 2)
+                    << "\" y=\"" << (y + 9)
+                    << "\" font-family=\"Arial\" font-size=\"8\" "
+                    << "font-weight=\"bold\" text-anchor=\"middle\" "
+                    << "fill=\"#ff0000\">!</text>\n";
+            }
+
+            // Marcador de escolha por sorteio
+            if (reg.eventoSorteio) {
+                arq << "<polygon points=\""
+                    << (x + larguraBloco / 2) << "," << (y + 21) << " "
+                    << (x + larguraBloco / 2 + 5) << "," << (y + 26) << " "
+                    << (x + larguraBloco / 2) << "," << (y + 31) << " "
+                    << (x + larguraBloco / 2 - 5) << "," << (y + 26)
+                    << "\" fill=\"#0000ff\" stroke=\"#ffffff\" "
+                    << "stroke-width=\"1\">\n"
+                    << "<title>Escolha por sorteio</title>\n"
+                    << "</polygon>\n";
+            }
+
+            // Linha indicando fim do quantum
             if (reg.eventoFimQuantum) {
                 arq << "<line x1=\"" << (x + larguraBloco)
                     << "\" y1=\"" << y
@@ -114,5 +207,103 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
         }
     }
 
+    for (size_t passo = 1; passo <= indicePassoAtual_; ++passo) {
+        const auto& snapshot = historicoSnapshots_[passo];
+
+        for (size_t c = 0; c < snapshot.cpusDesligadasNoTick.size(); ++c) {
+            if (!snapshot.cpusDesligadasNoTick[c]) {
+                continue;
+            }
+
+            int x = margemEsquerda +
+                static_cast<int>(snapshot.relogioGlobal - 1) * larguraBloco;
+            int y = yInicioCPUs +
+                static_cast<int>(c) * alturaLinhaCPU + 4;
+
+            arq << "<rect x=\"" << x << "\" y=\"" << y
+                << "\" width=\"" << larguraBloco
+                << "\" height=\"20\" fill=\"url(#cpuDesligada)\" "
+                << "stroke=\"#333333\" stroke-width=\"0.5\">\n"
+                << "<title>CPU " << c << " desligada no tick "
+                << (snapshot.relogioGlobal - 1) << "</title>\n"
+                << "</rect>\n";
+        }
+    }
+
+    int legendaY = fimLinhas + 42;
+    int coluna1 = margemEsquerda;
+    int coluna2 = margemEsquerda + 175;
+    int coluna3 = margemEsquerda + 350;
+    int coluna4 = margemEsquerda + 525;
+
+    arq << "<text x=\"" << margemEsquerda << "\" y=\"" << (legendaY - 12)
+        << "\" font-family=\"Arial\" font-size=\"12\" "
+        << "font-weight=\"bold\">Legenda</text>\n";
+
+    // Linha 1: estados
+    arq << "<rect x=\"" << coluna1 << "\" y=\"" << legendaY - 10
+        << "\" width=\"18\" height=\"14\" fill=\"#808080\"/>\n"
+        << "<text x=\"" << coluna1 + 24 << "\" y=\"" << legendaY + 2
+        << "\" font-family=\"Arial\" font-size=\"11\">Executando</text>\n";
+
+    arq << "<rect x=\"" << coluna2 << "\" y=\"" << legendaY - 10
+        << "\" width=\"18\" height=\"14\" fill=\"none\" "
+        << "stroke=\"#888888\" stroke-dasharray=\"2,2\"/>\n"
+        << "<text x=\"" << coluna2 + 24 << "\" y=\"" << legendaY + 2
+        << "\" font-family=\"Arial\" font-size=\"11\">Pronta</text>\n";
+
+    arq << "<rect x=\"" << coluna3 << "\" y=\"" << legendaY - 10
+        << "\" width=\"18\" height=\"14\" fill=\"url(#suspenso)\" "
+        << "stroke=\"#000000\"/>\n"
+        << "<text x=\"" << coluna3 + 24 << "\" y=\"" << legendaY + 2
+        << "\" font-family=\"Arial\" font-size=\"11\">Suspensa</text>\n";
+
+    // Linha 2: eventos
+    int eventosY = legendaY + 25;
+
+    arq << "<circle cx=\"" << coluna1 + 7 << "\" cy=\"" << eventosY - 4
+        << "\" r=\"5\" fill=\"#ffffff\" stroke=\"#008000\" stroke-width=\"2\"/>"
+        << "<text x=\"" << coluna1 + 18 << "\" y=\"" << eventosY
+        << "\" font-family=\"Arial\" font-size=\"11\">Chegada</text>\n";
+
+    arq << "<circle cx=\"" << coluna2 + 7 << "\" cy=\"" << eventosY - 4
+        << "\" r=\"5\" fill=\"#ffffff\" stroke=\"#000000\" stroke-width=\"2\"/>"
+        << "<text x=\"" << coluna2 + 18 << "\" y=\"" << eventosY
+        << "\" font-family=\"Arial\" font-size=\"11\">Conclusão</text>\n";
+
+    arq << "<circle cx=\"" << coluna3 + 7 << "\" cy=\"" << eventosY - 4
+        << "\" r=\"5\" fill=\"#ffffff\" stroke=\"#ff0000\" stroke-width=\"2\"/>"
+        << "<text x=\"" << coluna3 + 18 << "\" y=\"" << eventosY
+        << "\" font-family=\"Arial\" font-size=\"11\">Prazo perdido</text>\n";
+
+    arq << "<polygon points=\""
+        << coluna4 + 2 << "," << eventosY - 4 << " "
+        << coluna4 + 7 << "," << eventosY - 9 << " "
+        << coluna4 + 12 << "," << eventosY - 4 << " "
+        << coluna4 + 7 << "," << eventosY + 1
+        << "\" fill=\"#0000ff\"/>\n"
+        << "<text x=\"" << coluna4 + 18 << "\" y=\"" << eventosY
+        << "\" font-family=\"Arial\" font-size=\"11\">Sorteio</text>\n";
+
+    arq << "<line x1=\"" << coluna1 << "\" y1=\"" << eventosY + 18
+        << "\" x2=\"" << coluna1 + 18 << "\" y2=\"" << eventosY + 18
+        << "\" stroke=\"#000000\" stroke-width=\"2\"/>\n"
+        << "<text x=\"" << coluna1 + 24 << "\" y=\"" << eventosY + 22
+        << "\" font-family=\"Arial\" font-size=\"11\">Fim do quantum</text>\n";
+    
+    // Legenda: CPU desligada
+    int xLegendaCPU = margemEsquerda + 175;
+    int yLegendaCPU = alturaTotal - 26;
+
+    arq << "<rect x=\"" << xLegendaCPU
+        << "\" y=\"" << yLegendaCPU - 13
+        << "\" width=\"18\" height=\"14\" "
+        << "fill=\"url(#cpuDesligada)\" "
+        << "stroke=\"#333333\" stroke-width=\"1\"/>\n"
+        << "<text x=\"" << xLegendaCPU + 24
+        << "\" y=\"" << yLegendaCPU
+        << "\" font-family=\"Arial\" font-size=\"11\">"
+        << "CPU desligada</text>\n";
+        
     arq << "</svg>\n";
 }

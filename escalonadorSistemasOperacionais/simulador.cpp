@@ -3,8 +3,13 @@
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
+#include <random>
+#include <stdexcept>
+#include <cctype>
 
-Simulador::Simulador(const ConfiguracaoSistema& config) : configOriginal_(config) {
+Simulador::Simulador(const ConfiguracaoSistema& config)
+    : configOriginal_(config),
+      geradorAleatorio_(std::random_device{}()) {
     SnapshotSimulacao inicial;
     inicial.relogioGlobal = 0;
     inicial.tarefas = config.tarefas;
@@ -36,6 +41,49 @@ size_t Simulador::getPassoAtual() const {
     return indicePassoAtual_;
 }
 
+std::vector<IntervaloCPUDesligada>
+Simulador::getPeriodosCPUsDesligadas() const {
+    std::vector<IntervaloCPUDesligada> periodos;
+
+    for (size_t cpu = 0; cpu < configOriginal_.quantidadeCpus; ++cpu) {
+        bool intervaloAberto = false;
+        long long inicioIntervalo = 0;
+
+        // O snapshot 0 é o estado inicial e não corresponde a um tick executado.
+        for (size_t passo = 1; passo <= indicePassoAtual_; ++passo) {
+            const auto& snapshot = historicoSnapshots_[passo];
+            const long long inicioTick = snapshot.relogioGlobal - 1;
+
+            const bool desligada =
+                cpu < snapshot.cpusDesligadasNoTick.size() &&
+                snapshot.cpusDesligadasNoTick[cpu];
+
+            if (desligada && !intervaloAberto) {
+                inicioIntervalo = inicioTick;
+                intervaloAberto = true;
+            } else if (!desligada && intervaloAberto) {
+                periodos.push_back({
+                    static_cast<int>(cpu),
+                    inicioIntervalo,
+                    inicioTick
+                });
+                intervaloAberto = false;
+            }
+        }
+
+        // Se a CPU ainda está desligada, fecha o período no relógio atual.
+        if (intervaloAberto) {
+            periodos.push_back({
+                static_cast<int>(cpu),
+                inicioIntervalo,
+                getEstadoAtual().relogioGlobal
+            });
+        }
+    }
+
+    return periodos;
+}
+
 bool Simulador::estaConcluida() const {
     return getEstadoAtual().concluida;
 }
@@ -65,8 +113,44 @@ void Simulador::avancarTick() {
     // 1. Atualizar ativações pontualmente no momento certo
     for (auto& tarefa : proximo.tarefas) {
         for (auto& oc : tarefa.ocorrencias) {
-            if (oc.estado == EstadoOcorrencia::Futura && instanteAtual >= oc.instanteAtivacao) {
+            if (oc.estado == EstadoOcorrencia::Futura &&
+                instanteAtual >= oc.instanteAtivacao) {
                 oc.estado = EstadoOcorrencia::Pronta;
+
+                RegistoGantt chegada{};
+                chegada.instante = proximo.relogioGlobal;
+                chegada.idTarefa = tarefa.id;
+                chegada.numeroOcorrencia = oc.numero;
+                chegada.idCPU = -1;
+                chegada.estado = EstadoOcorrencia::Pronta;
+                chegada.eventoChegada = true;
+
+                proximo.registosTick.push_back(chegada);
+            }
+        }
+    }
+
+    // Detectar perda de prazo antes de executar as tarefas deste tick.
+    for (auto& tarefa : proximo.tarefas) {
+        for (auto& oc : tarefa.ocorrencias) {
+            if (oc.estado == EstadoOcorrencia::Futura ||
+                oc.estado == EstadoOcorrencia::Concluida ||
+                oc.perdeuPrazo) {
+                continue;
+            }
+
+            if (proximo.relogioGlobal > oc.deadlineAbsoluto) {
+                oc.perdeuPrazo = true;
+
+                RegistoGantt evento{};
+                evento.instante = proximo.relogioGlobal;
+                evento.idTarefa = tarefa.id;
+                evento.numeroOcorrencia = oc.numero;
+                evento.idCPU = oc.cpuAtual;
+                evento.estado = oc.estado;
+                evento.eventoPerdaPrazo = true;
+
+                proximo.registosTick.push_back(evento);
             }
         }
     }
@@ -83,34 +167,84 @@ void Simulador::avancarTick() {
     }
 
     // 3. Ordenação Global Absoluta (Resolve o problema das tarefas roubarem a CPU 0)
-    std::sort(candidatas.begin(), candidatas.end(), [&](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+    auto vemAntes = [&](const std::pair<int, int>& a,
+                        const std::pair<int, int>& b) {
         const auto& t1 = proximo.tarefas[a.first];
         const auto& o1 = t1.ocorrencias[a.second];
         const auto& t2 = proximo.tarefas[b.first];
         const auto& o2 = t2.ocorrencias[b.second];
 
-        // Critério Algoritmo (RM / EDF)
-        if (configOriginal_.algoritmo == "RM") {
-            if (t1.periodo != t2.periodo) return t1.periodo < t2.periodo;
-        }
-        else if (configOriginal_.algoritmo == "EDF") {
-            if (o1.deadlineAbsoluto != o2.deadlineAbsoluto) return o1.deadlineAbsoluto < o2.deadlineAbsoluto;
+        // Critério principal do algoritmo.
+        if (configOriginal_.algoritmo == "RM" &&
+            t1.periodo != t2.periodo) {
+            return t1.periodo < t2.periodo;
         }
 
-        // Critério: Tarefa que já estava em execução leva vantagem para evitar troca de contexto
-        bool t1Exec = (o1.estado == EstadoOcorrencia::Executando);
-        bool t2Exec = (o2.estado == EstadoOcorrencia::Executando);
-        if (t1Exec != t2Exec) return t1Exec;
+        if (configOriginal_.algoritmo == "EDF" &&
+            o1.deadlineAbsoluto != o2.deadlineAbsoluto) {
+            return o1.deadlineAbsoluto < o2.deadlineAbsoluto;
+        }
 
-        // Desempates
-        if (t1.prazo != t2.prazo) return t1.prazo < t2.prazo;
-        if (o1.instanteAtivacao != o2.instanteAtivacao) return o1.instanteAtivacao < o2.instanteAtivacao;
-        if (t1.duracao != t2.duracao) return t1.duracao < t2.duracao;
-        return t1.id < t2.id;
-        });
+        // Em empate no algoritmo, manter a tarefa que já estava executando.
+        const bool t1Executava = o1.estado == EstadoOcorrencia::Executando;
+        const bool t2Executava = o2.estado == EstadoOcorrencia::Executando;
+
+        if (t1Executava != t2Executava) {
+            return t1Executava;
+        }
+
+        // Desempates exigidos pelo enunciado.
+        if (t1.prazo != t2.prazo) {
+            return t1.prazo < t2.prazo;
+        }
+
+        if (o1.instanteAtivacao != o2.instanteAtivacao) {
+            return o1.instanteAtivacao < o2.instanteAtivacao;
+        }
+
+        if (t1.duracao != t2.duracao) {
+            return t1.duracao < t2.duracao;
+        }
+
+        // Retorna falso nos dois sentidos quando resta um empate completo.
+        // Esse empate será resolvido por sorteio depois da ordenação.
+        return false;
+    };
+
+    std::stable_sort(candidatas.begin(), candidatas.end(), vemAntes);
+
+    const size_t qtdSelecionadas =
+        std::min(candidatas.size(), proximo.cpus.size());
+
+    std::vector<std::pair<int, int>> sorteadas;
+
+    for (size_t inicio = 0; inicio < candidatas.size();) {
+        size_t fim = inicio + 1;
+
+        while (fim < candidatas.size() &&
+            !vemAntes(candidatas[inicio], candidatas[fim]) &&
+            !vemAntes(candidatas[fim], candidatas[inicio])) {
+            ++fim;
+        }
+
+        // Só sorteia quando há empate em todos os critérios anteriores.
+        if (fim - inicio > 1) {
+            std::shuffle(
+                candidatas.begin() + inicio,
+                candidatas.begin() + fim,
+                geradorAleatorio_);
+
+            // As candidatas sorteadas que obtiveram CPU receberão marcador no Gantt.
+            const size_t fimSelecionado = std::min(fim, qtdSelecionadas);
+            for (size_t i = inicio; i < fimSelecionado; ++i) {
+                sorteadas.push_back(candidatas[i]);
+            }
+        }
+
+        inicio = fim;
+    }
 
     // 4. Separar as N vencedoras (Limitado ao número de CPUs)
-    size_t qtdSelecionadas = std::min(candidatas.size(), proximo.cpus.size());
     std::vector<std::pair<int, int>> selecionadas(candidatas.begin(), candidatas.begin() + qtdSelecionadas);
     std::vector<std::pair<int, int>> emEspera(candidatas.begin() + qtdSelecionadas, candidatas.end());
 
@@ -153,10 +287,6 @@ void Simulador::avancarTick() {
         oSel.cpuAtual = c;
         oSel.tempoRestante--;
 
-        if (proximo.relogioGlobal > oSel.deadlineAbsoluto && oSel.tempoRestante > 0) {
-            oSel.perdeuPrazo = true;
-        }
-
         RegistoGantt rg;
         rg.instante = proximo.relogioGlobal;
         rg.idTarefa = tSel.id;
@@ -164,7 +294,9 @@ void Simulador::avancarTick() {
         rg.idCPU = c;
         rg.estado = EstadoOcorrencia::Executando;
         rg.eventoConclusao = (oSel.tempoRestante == 0);
-        rg.eventoPerdaPrazo = oSel.perdeuPrazo;
+        rg.eventoSorteio =
+            std::find(sorteadas.begin(), sorteadas.end(), selecionadas[i])
+            != sorteadas.end();
         rg.eventoFimQuantum = fimQuantum && oSel.tempoRestante > 0;
         proximo.registosTick.push_back(rg);
 
@@ -199,6 +331,13 @@ void Simulador::avancarTick() {
         }
     }
 
+    // cpuLivre[c] continua true se nenhuma tarefa foi atribuída à CPU neste tick.
+    proximo.cpusDesligadasNoTick.resize(proximo.cpus.size());
+
+    for (size_t c = 0; c < proximo.cpus.size(); ++c) {
+        proximo.cpusDesligadasNoTick[c] = cpuLivre[c];
+    }
+
     // 7. Registar tarefas que ficaram em estado de Espera/Prontas
     for (const auto& esp : emEspera) {
         auto& tEsp = proximo.tarefas[esp.first];
@@ -231,6 +370,224 @@ bool Simulador::retrocederTick() {
         return true;
     }
     return false;
+}
+
+void Simulador::alterarEstadoOcorrencia(
+    int idTarefa,
+    int numeroOcorrencia,
+    EstadoOcorrencia novoEstado) {
+
+    SnapshotSimulacao& estado = historicoSnapshots_[indicePassoAtual_];
+
+    auto tarefa = std::find_if(
+        estado.tarefas.begin(),
+        estado.tarefas.end(),
+        [idTarefa](const Tarefa& t) {
+            return t.id == idTarefa;
+        });
+
+    if (tarefa == estado.tarefas.end()) {
+        throw std::runtime_error("Nao existe tarefa com esse ID.");
+    }
+
+    auto ocorrencia = std::find_if(
+        tarefa->ocorrencias.begin(),
+        tarefa->ocorrencias.end(),
+        [numeroOcorrencia](const Ocorrencia& oc) {
+            return oc.numero == numeroOcorrencia;
+        });
+
+    if (ocorrencia == tarefa->ocorrencias.end()) {
+        throw std::runtime_error(
+            "Essa tarefa nao possui uma ocorrencia com esse numero.");
+    }
+
+    if (novoEstado == EstadoOcorrencia::Futura) {
+        if (estado.relogioGlobal >= ocorrencia->instanteAtivacao) {
+            throw std::runtime_error(
+                "So e possivel voltar ao estado Futura antes da ativacao.");
+        }
+    } else if (estado.relogioGlobal < ocorrencia->instanteAtivacao) {
+        throw std::runtime_error(
+            "A ocorrencia ainda nao chegou ao instante de ativacao.");
+    }
+
+    if ((novoEstado == EstadoOcorrencia::Pronta ||
+         novoEstado == EstadoOcorrencia::Suspensa ||
+         novoEstado == EstadoOcorrencia::Executando) &&
+        ocorrencia->tempoRestante <= 0) {
+        throw std::runtime_error(
+            "A ocorrencia nao tem tempo restante para esse estado.");
+    }
+
+    int cpuDestino = -1;
+
+    if (novoEstado == EstadoOcorrencia::Executando) {
+        if (ocorrencia->estado == EstadoOcorrencia::Executando &&
+            ocorrencia->cpuAtual >= 0 &&
+            ocorrencia->cpuAtual < static_cast<int>(estado.cpus.size())) {
+            cpuDestino = ocorrencia->cpuAtual;
+        } else {
+            for (size_t c = 0; c < estado.cpus.size(); ++c) {
+                if (estado.cpus[c].idTarefaAtual == -1) {
+                    cpuDestino = static_cast<int>(c);
+                    break;
+                }
+            }
+        }
+
+        if (cpuDestino == -1) {
+            throw std::runtime_error(
+                "Nao ha uma CPU livre para executar essa ocorrencia.");
+        }
+    }
+
+    // Libera qualquer CPU que estivesse associada a esta ocorrência.
+    for (auto& cpu : estado.cpus) {
+        if (cpu.idTarefaAtual == idTarefa &&
+            cpu.numeroOcorrenciaAtual == numeroOcorrencia) {
+            cpu.idTarefaAtual = -1;
+            cpu.numeroOcorrenciaAtual = -1;
+            cpu.tempoExecutadoNoQuantum = 0;
+        }
+    }
+
+    ocorrencia->cpuAtual = -1;
+    ocorrencia->estado = novoEstado;
+
+    if (novoEstado == EstadoOcorrencia::Futura) {
+        ocorrencia->tempoRestante = tarefa->duracao;
+        ocorrencia->perdeuPrazo = false;
+    } else if (novoEstado == EstadoOcorrencia::Concluida) {
+        ocorrencia->tempoRestante = 0;
+    } else if (novoEstado == EstadoOcorrencia::Executando) {
+        ocorrencia->cpuAtual = cpuDestino;
+
+        estado.cpus[cpuDestino].idTarefaAtual = idTarefa;
+        estado.cpus[cpuDestino].numeroOcorrenciaAtual = numeroOcorrencia;
+        estado.cpus[cpuDestino].tempoExecutadoNoQuantum = 0;
+    }
+
+    // Uma alteração no passado cria uma nova linha do tempo.
+    if (indicePassoAtual_ + 1 < historicoSnapshots_.size()) {
+        historicoSnapshots_.erase(
+            historicoSnapshots_.begin() + indicePassoAtual_ + 1,
+            historicoSnapshots_.end());
+    }
+
+    estado.concluida = verificarConclusaoGeral(estado);
+}
+
+void Simulador::alterarCaracteristicaTarefa(
+    int idTarefa,
+    const std::string& campo,
+    const std::string& valor) {
+
+    SnapshotSimulacao& estado = historicoSnapshots_[indicePassoAtual_];
+
+    auto tarefa = std::find_if(
+        estado.tarefas.begin(),
+        estado.tarefas.end(),
+        [idTarefa](const Tarefa& t) {
+            return t.id == idTarefa;
+        });
+
+    if (tarefa == estado.tarefas.end()) {
+        throw std::runtime_error("Nao existe tarefa com esse ID.");
+    }
+
+    if (campo == "cor") {
+        const bool corValida =
+            valor.size() == 6 &&
+            std::all_of(
+                valor.begin(),
+                valor.end(),
+                [](unsigned char c) {
+                    return std::isxdigit(c) != 0;
+                });
+
+        if (!corValida) {
+            throw std::runtime_error(
+                "A cor deve ter 6 digitos hexadecimais, por exemplo FF0000.");
+        }
+
+        tarefa->cor = valor;
+    } else {
+        // Alterações de tempo são seguras somente antes de qualquer
+        // ocorrência da tarefa ter sido ativada.
+        for (const auto& oc : tarefa->ocorrencias) {
+            if (oc.estado != EstadoOcorrencia::Futura) {
+                throw std::runtime_error(
+                    "Essa caracteristica temporal nao pode ser alterada: "
+                    "a tarefa ja possui ocorrencia ativada.");
+            }
+        }
+
+        int numero;
+        try {
+            size_t lidos = 0;
+            numero = std::stoi(valor, &lidos);
+
+            if (lidos != valor.size()) {
+                throw std::runtime_error("");
+            }
+        } catch (...) {
+            throw std::runtime_error(
+                "O valor da caracteristica deve ser um numero inteiro.");
+        }
+
+        if (campo == "ingresso") {
+            if (numero < 0) {
+                throw std::runtime_error("O ingresso nao pode ser negativo.");
+            }
+            tarefa->ingresso = numero;
+        } else if (campo == "duracao") {
+            if (numero <= 0) {
+                throw std::runtime_error("A duracao deve ser maior que zero.");
+            }
+            tarefa->duracao = numero;
+        } else if (campo == "periodo") {
+            if (numero <= 0) {
+                throw std::runtime_error(
+                    "No Projeto A, o periodo deve ser maior que zero.");
+            }
+            tarefa->periodo = numero;
+        } else if (campo == "prazo") {
+            if (numero <= 0) {
+                throw std::runtime_error("O prazo deve ser maior que zero.");
+            }
+            tarefa->prazo = numero;
+        } else {
+            throw std::runtime_error(
+                "Campo invalido. Use cor, ingresso, duracao, periodo ou prazo.");
+        }
+
+        for (auto& oc : tarefa->ocorrencias) {
+            oc.instanteAtivacao =
+                tarefa->ingresso +
+                static_cast<long long>(oc.numero - 1) * tarefa->periodo;
+
+            if (oc.instanteAtivacao < estado.relogioGlobal) {
+                throw std::runtime_error(
+                    "A nova configuracao colocaria uma ativacao no passado.");
+            }
+
+            oc.deadlineAbsoluto =
+                oc.instanteAtivacao + tarefa->prazo;
+            oc.tempoRestante = tarefa->duracao;
+            oc.perdeuPrazo = false;
+            oc.cpuAtual = -1;
+        }
+    }
+
+    // A edição cria um novo ramo se o usuário havia retrocedido.
+    if (indicePassoAtual_ + 1 < historicoSnapshots_.size()) {
+        historicoSnapshots_.erase(
+            historicoSnapshots_.begin() + indicePassoAtual_ + 1,
+            historicoSnapshots_.end());
+    }
+
+    estado.concluida = verificarConclusaoGeral(estado);
 }
 
 bool Simulador::verificarConclusaoGeral(const SnapshotSimulacao& estado) const {
