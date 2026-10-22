@@ -1,4 +1,5 @@
 #include "Simulador.h"
+#include "algoritmo.h"
 #include <fstream>
 #include <algorithm>
 #include <iostream>
@@ -7,6 +8,8 @@
 #include <stdexcept>
 #include <cctype>
 
+// Cria o snapshot inicial no tick 0, prepara as dez ocorrências de cada tarefa
+// periódica e inicia o gerador usado para resolver empates completos por sorteio.
 Simulador::Simulador(const ConfiguracaoSistema& config)
     : configOriginal_(config),
       geradorAleatorio_(std::random_device{}()) {
@@ -33,14 +36,19 @@ Simulador::Simulador(const ConfiguracaoSistema& config)
     historicoSnapshots_.push_back(inicial);
 }
 
+// Devolve o snapshot selecionado pelo índice atual do histórico.
+// A referência evita copiar todos os dados do sistema.
 const SnapshotSimulacao& Simulador::getEstadoAtual() const {
     return historicoSnapshots_[indicePassoAtual_];
 }
 
+// Devolve a posição atual no histórico de snapshots.
 size_t Simulador::getPassoAtual() const {
     return indicePassoAtual_;
 }
 
+// Percorre o histórico até o passo atual e agrupa, por CPU, os ticks
+// consecutivos em que não houve tarefa executando.
 std::vector<IntervaloCPUDesligada>
 Simulador::getPeriodosCPUsDesligadas() const {
     std::vector<IntervaloCPUDesligada> periodos;
@@ -84,26 +92,24 @@ Simulador::getPeriodosCPUsDesligadas() const {
     return periodos;
 }
 
+// Consulta a indicação de conclusão armazenada no snapshot atual.
 bool Simulador::estaConcluida() const {
     return getEstadoAtual().concluida;
 }
 
-// Mantido apenas para retrocompatibilidade com o Simulador.h
-void Simulador::processarAtivacoes(SnapshotSimulacao& estado) {
-    // A ativação foi movida diretamente para dentro do avancarTick 
-    // para garantir o tempo exato (instanteAtual).
-}
-
-bool Simulador::testarDesempate(const Tarefa& t1, const Ocorrencia& o1, const Tarefa& t2, const Ocorrencia& o2, int idCPUAtual) {
-    return false; // A lógica de desempate passou para a função lambda de ordenação global
-}
-
+// Avança a simulação em um tick. O método parte de uma cópia do estado atual
+// para calcular o próximo estado sem alterar snapshots anteriores. Nesse tick,
+// ativa ocorrências, verifica prazos, ordena as candidatas, distribui tarefas
+// pelas CPUs, atualiza execução e quantum, registra eventos e salva o resultado
+// no histórico. Se o usuário avançou após voltar no tempo, o futuro antigo é
+// descartado antes de salvar o novo estado.
 void Simulador::avancarTick() {
     if (historicoSnapshots_[indicePassoAtual_].concluida) return;
 
     SnapshotSimulacao proximo = historicoSnapshots_[indicePassoAtual_];
 
-    // CORREÇÃO 1: Usar o instante de tempo *antes* do tick para as ativações
+    // Guarda o relógio antes de incrementá-lo: uma ocorrência cuja ativação
+    // coincide com esse instante fica pronta para executar neste tick.
     long long instanteAtual = proximo.relogioGlobal;
     proximo.relogioGlobal++;
     proximo.registosTick.clear();
@@ -166,49 +172,23 @@ void Simulador::avancarTick() {
         }
     }
 
-    // 3. Ordenação Global Absoluta (Resolve o problema das tarefas roubarem a CPU 0)
+    // Ordena todas as candidatas em conjunto antes de distribuí-las entre as CPUs.
+    // Assim, a prioridade é comparada globalmente e não depende da CPU analisada.
     auto vemAntes = [&](const std::pair<int, int>& a,
-                        const std::pair<int, int>& b) {
-        const auto& t1 = proximo.tarefas[a.first];
-        const auto& o1 = t1.ocorrencias[a.second];
-        const auto& t2 = proximo.tarefas[b.first];
-        const auto& o2 = t2.ocorrencias[b.second];
+                    const std::pair<int, int>& b) {
+        const auto& tarefa1 = proximo.tarefas[a.first];
+        const auto& ocorrencia1 =
+            tarefa1.ocorrencias[a.second];
+        const auto& tarefa2 = proximo.tarefas[b.first];
+        const auto& ocorrencia2 =
+            tarefa2.ocorrencias[b.second];
 
-        // Critério principal do algoritmo.
-        if (configOriginal_.algoritmo == "RM" &&
-            t1.periodo != t2.periodo) {
-            return t1.periodo < t2.periodo;
-        }
-
-        if (configOriginal_.algoritmo == "EDF" &&
-            o1.deadlineAbsoluto != o2.deadlineAbsoluto) {
-            return o1.deadlineAbsoluto < o2.deadlineAbsoluto;
-        }
-
-        // Em empate no algoritmo, manter a tarefa que já estava executando.
-        const bool t1Executava = o1.estado == EstadoOcorrencia::Executando;
-        const bool t2Executava = o2.estado == EstadoOcorrencia::Executando;
-
-        if (t1Executava != t2Executava) {
-            return t1Executava;
-        }
-
-        // Desempates exigidos pelo enunciado.
-        if (t1.prazo != t2.prazo) {
-            return t1.prazo < t2.prazo;
-        }
-
-        if (o1.instanteAtivacao != o2.instanteAtivacao) {
-            return o1.instanteAtivacao < o2.instanteAtivacao;
-        }
-
-        if (t1.duracao != t2.duracao) {
-            return t1.duracao < t2.duracao;
-        }
-
-        // Retorna falso nos dois sentidos quando resta um empate completo.
-        // Esse empate será resolvido por sorteio depois da ordenação.
-        return false;
+        return prioridadeAntes(
+            configOriginal_.algoritmo,
+            tarefa1,
+            ocorrencia1,
+            tarefa2,
+            ocorrencia2);
     };
 
     std::stable_sort(candidatas.begin(), candidatas.end(), vemAntes);
@@ -248,7 +228,9 @@ void Simulador::avancarTick() {
     std::vector<std::pair<int, int>> selecionadas(candidatas.begin(), candidatas.begin() + qtdSelecionadas);
     std::vector<std::pair<int, int>> emEspera(candidatas.begin() + qtdSelecionadas, candidatas.end());
 
-    // 5. Atribuir às CPUs mantendo a localidade (Evita pular de CPU 1 para CPU 0 atoa)
+    // Mantém na mesma CPU as ocorrências que continuam executando e ainda foram
+    // selecionadas. Depois, distribui as demais pelas CPUs livres, evitando migrações
+    // desnecessárias sem permitir que uma CPU receba duas ocorrências no mesmo tick.
     std::vector<bool> cpuLivre(proximo.cpus.size(), true);
     std::vector<int> alocacaoCPU(selecionadas.size(), -1);
 
@@ -283,6 +265,9 @@ void Simulador::avancarTick() {
         int ticksNaFatia = mesmaOcorrencia ? cpuAnterior.tempoExecutadoNoQuantum + 1 : 1;
         bool fimQuantum = (ticksNaFatia >= configOriginal_.quantum);
 
+        const bool jaEstavaExecutando =
+        oSel.estado == EstadoOcorrencia::Executando;
+
         oSel.estado = EstadoOcorrencia::Executando;
         oSel.cpuAtual = c;
         oSel.tempoRestante--;
@@ -295,12 +280,14 @@ void Simulador::avancarTick() {
         rg.estado = EstadoOcorrencia::Executando;
         rg.eventoConclusao = (oSel.tempoRestante == 0);
         rg.eventoSorteio =
+            !jaEstavaExecutando &&
             std::find(sorteadas.begin(), sorteadas.end(), selecionadas[i])
             != sorteadas.end();
         rg.eventoFimQuantum = fimQuantum && oSel.tempoRestante > 0;
         proximo.registosTick.push_back(rg);
 
-        // CORREÇÃO 2: Limpeza rigorosa da memória da CPU no Fim do Quantum
+        // Libera ou mantém a CPU conforme o resultado da execução deste tick:
+        // a ocorrência pode ter concluído, esgotado o quantum ou continuar executando.
         if (oSel.tempoRestante == 0) {
             oSel.estado = EstadoOcorrencia::Concluida;
             oSel.cpuAtual = -1;
@@ -364,6 +351,8 @@ void Simulador::avancarTick() {
     indicePassoAtual_++;
 }
 
+// Volta o índice para o snapshot anterior sem recalcular a simulação.
+// Retorna false quando já está no snapshot inicial, que representa o tick 0.
 bool Simulador::retrocederTick() {
     if (indicePassoAtual_ > 0) {
         indicePassoAtual_--;
@@ -372,6 +361,9 @@ bool Simulador::retrocederTick() {
     return false;
 }
 
+// Altera manualmente o estado de uma ocorrência após validar a tarefa, o número
+// da ocorrência, o instante de ativação e a disponibilidade de CPU. A função
+// também mantém os dados da ocorrência e da CPU sincronizados.
 void Simulador::alterarEstadoOcorrencia(
     int idTarefa,
     int numeroOcorrencia,
@@ -385,7 +377,7 @@ void Simulador::alterarEstadoOcorrencia(
         [idTarefa](const Tarefa& t) {
             return t.id == idTarefa;
         });
-
+    
     if (tarefa == estado.tarefas.end()) {
         throw std::runtime_error("Nao existe tarefa com esse ID.");
     }
@@ -402,6 +394,9 @@ void Simulador::alterarEstadoOcorrencia(
             "Essa tarefa nao possui uma ocorrencia com esse numero.");
     }
 
+    // Evita estados incompatíveis com o relógio: uma ocorrência só pode voltar
+    // a Futura antes da ativação, e os demais estados só podem ser escolhidos
+    // depois que ela já foi ativada.
     if (novoEstado == EstadoOcorrencia::Futura) {
         if (estado.relogioGlobal >= ocorrencia->instanteAtivacao) {
             throw std::runtime_error(
@@ -420,6 +415,8 @@ void Simulador::alterarEstadoOcorrencia(
             "A ocorrencia nao tem tempo restante para esse estado.");
     }
 
+    // Para marcar a ocorrência como Executando, é necessário reservar uma CPU.
+    // Se ela já executava, tenta manter a CPU atual; caso contrário, procura uma CPU livre.
     int cpuDestino = -1;
 
     if (novoEstado == EstadoOcorrencia::Executando) {
@@ -442,7 +439,8 @@ void Simulador::alterarEstadoOcorrencia(
         }
     }
 
-    // Libera qualquer CPU que estivesse associada a esta ocorrência.
+    // Remove a associação anterior antes de aplicar o novo estado, evitando que
+    // a CPU continue apontando para uma ocorrência que deixou de executá-la.
     for (auto& cpu : estado.cpus) {
         if (cpu.idTarefaAtual == idTarefa &&
             cpu.numeroOcorrenciaAtual == numeroOcorrencia) {
@@ -468,7 +466,8 @@ void Simulador::alterarEstadoOcorrencia(
         estado.cpus[cpuDestino].tempoExecutadoNoQuantum = 0;
     }
 
-    // Uma alteração no passado cria uma nova linha do tempo.
+    // Se o usuário voltou no histórico antes de editar, os snapshots posteriores
+    // deixam de ser válidos: foram calculados a partir do estado anterior à edição.
     if (indicePassoAtual_ + 1 < historicoSnapshots_.size()) {
         historicoSnapshots_.erase(
             historicoSnapshots_.begin() + indicePassoAtual_ + 1,
@@ -478,6 +477,9 @@ void Simulador::alterarEstadoOcorrencia(
     estado.concluida = verificarConclusaoGeral(estado);
 }
 
+// Altera uma característica da tarefa no snapshot atual e valida o novo valor.
+// As ocorrências que já deixaram de ser Futura mantêm seu histórico; os dados
+// das ocorrências futuras são recalculados conforme a característica alterada.
 void Simulador::alterarCaracteristicaTarefa(
     int idTarefa,
     const std::string& campo,
@@ -496,7 +498,9 @@ void Simulador::alterarCaracteristicaTarefa(
         throw std::runtime_error("Nao existe tarefa com esse ID.");
     }
 
-    if (campo == "cor") {
+        // A cor é validada como seis dígitos hexadecimais; as outras características
+        // aceitas são números inteiros sujeitos às regras de ingresso, duração, período e prazo.
+        if (campo == "cor") {
         const bool corValida =
             valor.size() == 6 &&
             std::all_of(
@@ -513,17 +517,8 @@ void Simulador::alterarCaracteristicaTarefa(
 
         tarefa->cor = valor;
     } else {
-        // Alterações de tempo são seguras somente antes de qualquer
-        // ocorrência da tarefa ter sido ativada.
-        for (const auto& oc : tarefa->ocorrencias) {
-            if (oc.estado != EstadoOcorrencia::Futura) {
-                throw std::runtime_error(
-                    "Essa caracteristica temporal nao pode ser alterada: "
-                    "a tarefa ja possui ocorrencia ativada.");
-            }
-        }
-
         int numero;
+
         try {
             size_t lidos = 0;
             numero = std::stoi(valor, &lidos);
@@ -536,51 +531,90 @@ void Simulador::alterarCaracteristicaTarefa(
                 "O valor da caracteristica deve ser um numero inteiro.");
         }
 
-        if (campo == "ingresso") {
-            if (numero < 0) {
-                throw std::runtime_error("O ingresso nao pode ser negativo.");
-            }
-            tarefa->ingresso = numero;
-        } else if (campo == "duracao") {
-            if (numero <= 0) {
-                throw std::runtime_error("A duracao deve ser maior que zero.");
-            }
-            tarefa->duracao = numero;
-        } else if (campo == "periodo") {
-            if (numero <= 0) {
-                throw std::runtime_error(
-                    "No Projeto A, o periodo deve ser maior que zero.");
-            }
-            tarefa->periodo = numero;
-        } else if (campo == "prazo") {
-            if (numero <= 0) {
-                throw std::runtime_error("O prazo deve ser maior que zero.");
-            }
-            tarefa->prazo = numero;
-        } else {
+        if (campo != "ingresso" &&
+            campo != "duracao" &&
+            campo != "periodo" &&
+            campo != "prazo") {
             throw std::runtime_error(
                 "Campo invalido. Use cor, ingresso, duracao, periodo ou prazo.");
         }
 
-        for (auto& oc : tarefa->ocorrencias) {
-            oc.instanteAtivacao =
-                tarefa->ingresso +
-                static_cast<long long>(oc.numero - 1) * tarefa->periodo;
+        if (campo == "ingresso" && numero < 0) {
+            throw std::runtime_error("O ingresso nao pode ser negativo.");
+        }
+        if (campo == "duracao" && numero <= 0) {
+            throw std::runtime_error("A duracao deve ser maior que zero.");
+        }
+        if (campo == "periodo" && numero <= 0) {
+            throw std::runtime_error(
+                "No Projeto A, o periodo deve ser maior que zero.");
+        }
+        if (campo == "prazo" && numero <= 0) {
+            throw std::runtime_error("O prazo deve ser maior que zero.");
+        }
 
-            if (oc.instanteAtivacao < estado.relogioGlobal) {
-                throw std::runtime_error(
-                    "A nova configuracao colocaria uma ativacao no passado.");
+        if (campo == "ingresso") {
+            tarefa->ingresso = numero;
+        } else if (campo == "duracao") {
+            tarefa->duracao = numero;
+        } else if (campo == "periodo") {
+            tarefa->periodo = numero;
+        } else if (campo == "prazo") {
+            tarefa->prazo = numero;
+        }
+        
+        // Ingresso e período alteram o calendário das ocorrências futuras. O cálculo
+        // começa na próxima ativação possível, nunca antes do relógio atual.
+        if (campo == "ingresso" || campo == "periodo") {
+            long long proximaAtivacao = tarefa->ingresso;
+
+            if (campo == "periodo") {
+                for (const auto& oc : tarefa->ocorrencias) {
+                    if (oc.estado != EstadoOcorrencia::Futura) {
+                        proximaAtivacao =
+                            oc.instanteAtivacao + tarefa->periodo;
+                    }
+                }
             }
 
-            oc.deadlineAbsoluto =
-                oc.instanteAtivacao + tarefa->prazo;
-            oc.tempoRestante = tarefa->duracao;
-            oc.perdeuPrazo = false;
-            oc.cpuAtual = -1;
+            proximaAtivacao =
+                std::max(proximaAtivacao, estado.relogioGlobal);
+            
+            // Recalcula apenas ocorrências futuras, preservando as que já foram ativadas.
+            // Para cada uma, atualiza ativação, deadline e tempo restante.
+            for (auto& oc : tarefa->ocorrencias) {
+                if (oc.estado == EstadoOcorrencia::Futura) {
+                    oc.instanteAtivacao = proximaAtivacao;
+                    oc.deadlineAbsoluto =
+                        oc.instanteAtivacao + tarefa->prazo;
+                    oc.tempoRestante = tarefa->duracao;
+                    oc.perdeuPrazo = false;
+                    oc.cpuAtual = -1;
+
+                    proximaAtivacao += tarefa->periodo;
+                }
+            }
+        } 
+        else {
+            // Mudanças de duração ou prazo atualizam somente ocorrências futuras:
+            // as ocorrências já ativadas mantêm os valores do histórico.
+            for (auto& oc : tarefa->ocorrencias) {
+                if (oc.estado != EstadoOcorrencia::Futura) {
+                    continue;
+                }
+
+                if (campo == "duracao") {
+                    oc.tempoRestante = tarefa->duracao;
+                } else if (campo == "prazo") {
+                    oc.deadlineAbsoluto =
+                        oc.instanteAtivacao + tarefa->prazo;
+                }
+            }
         }
     }
 
-    // A edição cria um novo ramo se o usuário havia retrocedido.
+    // Se a edição foi feita após retroceder, remove os snapshots posteriores,
+    // pois eles foram calculados antes desta nova característica.
     if (indicePassoAtual_ + 1 < historicoSnapshots_.size()) {
         historicoSnapshots_.erase(
             historicoSnapshots_.begin() + indicePassoAtual_ + 1,
@@ -590,6 +624,8 @@ void Simulador::alterarCaracteristicaTarefa(
     estado.concluida = verificarConclusaoGeral(estado);
 }
 
+// Considera a simulação concluída somente quando todas as ocorrências
+// de todas as tarefas estão no estado Concluída.
 bool Simulador::verificarConclusaoGeral(const SnapshotSimulacao& estado) const {
     for (const auto& t : estado.tarefas) {
         for (const auto& oc : t.ocorrencias) {
@@ -601,6 +637,8 @@ bool Simulador::verificarConclusaoGeral(const SnapshotSimulacao& estado) const {
     return true;
 }
 
+// Executa a simulação sem interação: avança um tick por vez até que
+// verificarConclusaoGeral indique que todas as ocorrências terminaram.
 void Simulador::executarSimulacaoCompleta() {
     while (!estaConcluida()) {
         avancarTick();

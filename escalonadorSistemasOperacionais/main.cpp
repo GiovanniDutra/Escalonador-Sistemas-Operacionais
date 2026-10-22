@@ -4,6 +4,7 @@
 #include "LeitorConfig.h"
 #include "Simulador.h"
 
+// Converte o estado interno de uma ocorrência em texto para exibição no console.
 const char* nomeEstado(EstadoOcorrencia estado) {
     switch (estado) {
     case EstadoOcorrencia::Futura:    return "Futura";
@@ -15,6 +16,8 @@ const char* nomeEstado(EstadoOcorrencia estado) {
     }
 }
 
+// Lista no console os dados das tarefas e ocorrências no snapshot recebido,
+// facilitando acompanhar o estado da simulação no modo passo a passo.
 void exibirTarefas(const SnapshotSimulacao& estado) {
     std::cout << "\nTarefas no tick " << estado.relogioGlobal << ":\n";
 
@@ -46,6 +49,7 @@ void exibirTarefas(const SnapshotSimulacao& estado) {
     }
 }
 
+// Mostra os comandos disponíveis no modo passo a passo e como utilizá-los.
 void exibirAjuda() {
     std::cout << "\nComandos do Modo Passo-a-Passo:\n"
         << "  [ENTER] : Avanca 1 tick\n"
@@ -57,6 +61,8 @@ void exibirAjuda() {
         << "  q        : Sair\n";
 }
 
+// Ponto de entrada: carrega a configuração, inicia o modo de execução escolhido
+// e coordena os comandos do usuário ou a simulação completa.
 int main(int argc, char* argv[]) {
     std::string caminhoFicheiro;
 
@@ -75,6 +81,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // O bloco principal captura erros de configuração e execução para exibir
+    // uma mensagem compreensível em vez de encerrar o programa abruptamente.
     try {
         std::cout << "\nA carregar ficheiro de configuracao: " << caminhoFicheiro << "...\n";
         ConfiguracaoSistema config = carregarConfiguracao(caminhoFicheiro);
@@ -89,16 +97,25 @@ int main(int argc, char* argv[]) {
             << "2. Execucao Completa\n"
             << "Opcao: ";
 
-        int opcao = 1;
-        std::cin >> opcao;
+        int opcao = 0;
+
+        if (!(std::cin >> opcao) || (opcao != 1 && opcao != 2)) {
+            std::cerr << "Opcao invalida. Escolha 1 para passo a passo "
+                << "ou 2 para execucao completa.\n";
+            return 1;
+        }
+
         std::cin.ignore();
 
         Simulador simulador(config);
 
+        // A opção já foi validada: 1 inicia o modo interativo e 2 inicia a execução completa.
         if (opcao == 1) {
             exibirAjuda();
             std::string comando;
-
+            
+            // Em cada repetição, exibe o snapshot atual e aguarda um comando.
+            // O laço termina quando o usuário sai ou quando a simulação é concluída.
             while (true) {
                 const auto& est = simulador.getEstadoAtual();
                 std::cout << "\n================ [ TICK " << est.relogioGlobal << " ] ================\n";
@@ -126,6 +143,10 @@ int main(int argc, char* argv[]) {
                 else if (comando == "b") {
                     if (!simulador.retrocederTick()) {
                         std::cout << "Ja se encontra no instante inicial!\n";
+                    } 
+                    else {
+                        simulador.exportarGanttSVG("gantt_passo.svg");
+                        std::cout << "Grafico atualizado em 'gantt_passo.svg'.\n";
                     }
                 }
                 else if (comando == "l") {
@@ -135,6 +156,9 @@ int main(int argc, char* argv[]) {
                     simulador.exportarGanttSVG("gantt_passo.svg");
                     std::cout << "Grafico exportado para 'gantt_passo.svg'.\n";
                 }
+
+                // Interpreta o comando "e", converte o nome digitado para um estado
+                // e pede ao simulador para validar e aplicar a alteração.
                 else if (comando == "e" || comando.rfind("e ", 0) == 0) {
                     std::istringstream entrada(comando);
 
@@ -175,6 +199,7 @@ int main(int argc, char* argv[]) {
                                     numeroOcorrencia,
                                     novoEstado);
 
+                                simulador.exportarGanttSVG("gantt_passo.svg");
                                 std::cout << "Estado alterado. Digite l para conferir.\n";
                             } catch (const std::exception& erro) {
                                 std::cout << "Nao foi possivel alterar o estado: "
@@ -183,6 +208,8 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
+                // Interpreta o comando "c" e envia ao simulador a tarefa, o campo
+                // e o novo valor digitado pelo usuário.
                 else if (comando == "c" || comando.rfind("c ", 0) == 0) {
                     std::istringstream entrada(comando);
 
@@ -200,7 +227,8 @@ int main(int argc, char* argv[]) {
                                 idTarefa,
                                 campo,
                                 valor);
-
+                            
+                            simulador.exportarGanttSVG("gantt_passo.svg");
                             std::cout << "Caracteristica alterada. Digite l para conferir.\n";
                         } catch (const std::exception& erro) {
                             std::cout << "Nao foi possivel alterar: "
@@ -208,18 +236,31 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-                else {
+                // Os comandos reconhecidos acima têm ações próprias; os demais chegam aqui
+                // e avançam a simulação, exportando o SVG atualizado.
+                else if (comando.empty()) {
+                    // Uma linha vazia representa o comando ENTER e avança exatamente um tick.
                     simulador.avancarTick();
+                    simulador.exportarGanttSVG("gantt_passo.svg");
+                    std::cout << "Grafico atualizado em 'gantt_passo.svg'.\n";
+                }
+                else {
+                    // Comandos desconhecidos não devem alterar o estado da simulação.
+                    std::cout << "Comando invalido. Digite ENTER para avancar ou use "
+                        << "um dos comandos listados acima.\n";
                 }
             }
         }
+        // No modo completo, o simulador avança automaticamente até concluir
+        // todas as ocorrências, sem pedir comandos a cada tick.
         else {
-            std::cout << "A executar simualacao completa...\n";
+            std::cout << "A executar simulacao completa...\n";
             simulador.executarSimulacaoCompleta();
             std::cout << "Simulacao concluida no tick " << simulador.getEstadoAtual().relogioGlobal << ".\n";
         }
 
-        // Exportação final do Gráfico de Gantt
+        // Ao sair do modo escolhido, exporta o gráfico final e mostra os intervalos
+        // agrupados em que cada CPU ficou sem executar tarefas.
         simulador.exportarGanttSVG("gantt_final.svg");
         std::cout << "Grafico de Gantt gerado com sucesso: 'gantt_final.svg'\n";
 

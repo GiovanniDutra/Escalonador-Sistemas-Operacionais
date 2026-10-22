@@ -2,10 +2,17 @@
 #include <fstream>
 #include <algorithm>
 #include <map>
+#include <stdexcept>
 
+// Exporta para SVG o estado da simulação até o passo atual.
+// Os snapshots fornecem os eventos e estados; este método os converte
+// em formas e textos, sem alterar a simulação.
 void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
     std::ofstream arq(caminhoFicheiro);
-    if (!arq.is_open()) return;
+    if (!arq.is_open()) {
+        throw std::runtime_error(
+        "Nao foi possivel criar o arquivo SVG: " + caminhoFicheiro);
+    }
 
     const auto& estadoFinal = getEstadoAtual();
     long long tempoTotal = estadoFinal.relogioGlobal;
@@ -15,6 +22,8 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
     std::sort(tarefasOrdenadas.begin(), tarefasOrdenadas.end(),
         [](const Tarefa& a, const Tarefa& b) { return a.id > b.id; });
 
+    // Define a escala e as margens do desenho. Cada tick ocupa a mesma largura,
+    // para que os intervalos de execução possam ser comparados visualmente.
     int larguraBloco = 30;
     int alturaLinha = 40;
     int margemEsquerda = 100;
@@ -35,7 +44,8 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
 
     int alturaTotal = fimLinhas + 115;
 
-    // Cabeçalho SVG
+    // Abre o documento SVG e define padrões reutilizáveis para ocorrências
+    // suspensas e períodos em que uma CPU ficou desligada.
     arq << "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
         << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << larguraTotal
         << "\" height=\"" << alturaTotal << "\">\n"
@@ -88,7 +98,7 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
             << "\" stroke=\"#cccccc\" stroke-width=\"1\"/>\n";
     }
 
-    // Mapeamento de instantes de execução a partir dos snapshots
+    // Desenha uma linha e um rótulo para cada CPU, abaixo das linhas das tarefas.
     for (size_t c = 0; c < estadoFinal.cpus.size(); ++c) {
         int y = yInicioCPUs + static_cast<int>(c) * alturaLinhaCPU;
 
@@ -100,6 +110,8 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
             << "\" stroke=\"#cccccc\" stroke-width=\"1\"/>\n";
     }
 
+    // Percorre os registros dos snapshots executados até o passo atual.
+    // Cada registro vira um bloco, marcador ou linha na posição da tarefa e do tick.
     for (size_t passo = 1; passo <= indicePassoAtual_; ++passo) {
         const auto& snap = historicoSnapshots_[passo];
         long long t = snap.relogioGlobal;
@@ -209,7 +221,9 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
 
     for (size_t passo = 1; passo <= indicePassoAtual_; ++passo) {
         const auto& snapshot = historicoSnapshots_[passo];
-
+        
+        // Desenha uma faixa hachurada por CPU e tick ocioso.
+        // O snapshot inicial é ignorado porque ainda não representa um tick executado.
         for (size_t c = 0; c < snapshot.cpusDesligadasNoTick.size(); ++c) {
             if (!snapshot.cpusDesligadasNoTick[c]) {
                 continue;
@@ -291,7 +305,7 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
         << "<text x=\"" << coluna1 + 24 << "\" y=\"" << eventosY + 22
         << "\" font-family=\"Arial\" font-size=\"11\">Fim do quantum</text>\n";
     
-    // Legenda: CPU desligada
+    // Terceira linha da legenda: explica a hachura usada nos períodos de CPU desligada.
     int xLegendaCPU = margemEsquerda + 175;
     int yLegendaCPU = alturaTotal - 26;
 
@@ -306,4 +320,10 @@ void Simulador::exportarGanttSVG(const std::string& caminhoFicheiro) const {
         << "CPU desligada</text>\n";
         
     arq << "</svg>\n";
+    arq.close();
+
+    if (!arq) {
+        throw std::runtime_error(
+            "Ocorreu um erro ao gravar o arquivo SVG: " + caminhoFicheiro);
+    }
 }

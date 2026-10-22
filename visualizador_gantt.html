@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Gantt passo a passo</title>
+    <style>
+        body { margin: 0; background: #eeeeee; }
+        img { display: block; max-width: 100%; margin: auto; }
+    </style>
+</head>
+<body>
+    <img id="gantt" alt="Aguardando o gráfico">
+    <script>
+        const imagem = document.getElementById("gantt");
+
+        function atualizarGrafico() {
+            imagem.src = "gantt_passo.svg?t=" + Date.now();
+        }
+
+        atualizarGrafico();
+        setInterval(atualizarGrafico, 500);
+    </script>
+</body>
+</html>

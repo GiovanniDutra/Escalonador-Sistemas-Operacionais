@@ -88,6 +88,7 @@
     <ClCompile>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level3</WarningLevel>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -110,6 +111,7 @@
     <ClCompile>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <WarningLevel>Level3</WarningLevel>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -123,11 +125,13 @@
     <ClCompile Include="escalonadorsistemasoperacionais\leitorConfig.cpp" />
     <ClCompile Include="escalonadorsistemasoperacionais\main.cpp" />
     <ClCompile Include="escalonadorsistemasoperacionais\simulador.cpp" />
+    <ClCompile Include="escalonadorsistemasoperacionais\algoritmo.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="escalonadorsistemasoperacionais\leitorConfig.h" />
     <ClInclude Include="escalonadorsistemasoperacionais\modelos.h" />
     <ClInclude Include="escalonadorsistemasoperacionais\simulador.h" />
+    <ClInclude Include="escalonadorsistemasoperacionais\algoritmo.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
